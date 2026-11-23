@@ -153,7 +153,7 @@ sectionHTML os depth (Section _ _ ws _ _ _ _ _ _ od) = sectionStyling os depth t
 
 blockHTML :: OrgStyle -> Block -> Html ()
 blockHTML os b = case b of
-  Quote t                  -> blockquote_ . p_ $ toHtml t
+  Quote t                  -> blockquote_ . traverse_ (p_ . toHtml) $ T.splitOn "\n\n" t
   Example t | bootstrap os -> pre_ [class_ "example"] $ toHtml t
             | bulma os     -> pre_ [class_ "box"] $ toHtml t
             | otherwise    -> pre_ $ toHtml t
@@ -184,10 +184,15 @@ paragraphHTML os (h :| t) = wordsHTML h <> para h t
         _         -> sep <> wordsHTML w <> para w ws
 
 listItemsHTML :: OrgStyle -> ListItems -> Html ()
-listItemsHTML os (ListItems is) = ul_ [class_ "org-ul"] $ traverse_ f is
+listItemsHTML os (ListItems t is) = orderedOrNot [class_ "org-ul"] $ traverse_ f is
   where
     f :: Item -> Html ()
     f (Item ws next) = li_ $ paragraphHTML os ws >> traverse_ (listItemsHTML os) next
+
+    orderedOrNot = case t of
+      Numbered -> ol_
+      Bulleted -> ul_
+      Plussed  -> ul_
 
 tableHTML :: OrgStyle -> NonEmpty Row -> Html ()
 tableHTML os rs = table_ tblClasses $ do

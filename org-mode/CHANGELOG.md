@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.1.0 (2023-04-19)
+
+#### Changed
+
+- Support numbered lists.
+
+## 2.0.2 (2022-07-31)
+
+#### Changed
+
+- GHC 9.2 support.
+
+## 2.0.1 (2022-04-26)
+
+#### Added
+
+- GHC 9 support.
+
 ## 2.0.0 (2021-06-04)
 
 This release sees the extension of this library to understand heading

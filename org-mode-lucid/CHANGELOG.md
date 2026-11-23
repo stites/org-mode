@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.7.0 (2023-04-19)
+
+#### Changed
+
+- Match `org-mode-2.1`.
+
+## 1.6.4 (2022-07-31)
+
+#### Changed
+
+- GHC 9.2 support.
+
+## 1.6.3 (2022-07-17)
+
+#### Fixed
+
+- Account for `\n\n` gaps in Quote blocks.
+
+## 1.6.2 (2022-04-26)
+
+#### Added
+
+- GHC 9 support.
+
 ## 1.6.1 (2021-06-04)
 
 #### Fixed

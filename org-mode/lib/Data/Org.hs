@@ -2,6 +2,8 @@
 {-# LANGUAGE DeriveAnyClass     #-}
 {-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE TupleSections      #-}
+{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 
 -- |
 -- Module    : Data.Org
@@ -38,6 +40,7 @@ module Data.Org
   , Block(..)
   , Words(..)
   , ListItems(..)
+  , ListType(..)
   , Item(..)
   , Row(..)
   , Column(..)
@@ -72,6 +75,7 @@ module Data.Org
 import           Control.Applicative.Combinators.NonEmpty
 import           Control.Monad (void, when)
 import           Data.Bool (bool)
+import           Data.Char (isDigit)
 import           Data.Functor (($>))
 import           Data.Hashable (Hashable)
 import           Data.List.NonEmpty (NonEmpty(..))
@@ -89,8 +93,8 @@ import           GHC.Generics (Generic)
 import           System.FilePath (takeExtension)
 import           Text.Megaparsec hiding (sepBy1, sepEndBy1, some, someTill)
 import           Text.Megaparsec.Char
-import           Text.Megaparsec.Char.Lexer (decimal)
 import qualified Text.Megaparsec.Char.Lexer as L
+import           Text.Megaparsec.Char.Lexer (decimal)
 import           Text.Printf (printf)
 
 --------------------------------------------------------------------------------
@@ -282,18 +286,21 @@ data Todo = TODO | DONE
 newtype Priority = Priority { priority :: Text }
   deriving stock (Eq, Ord, Show, Generic)
 
--- | An org list constructed of @-@ characters.
+-- | An org list constructed of @-@ or @+@ characters, or numbers.
 --
 -- @
--- - Feed the cat
---   - The good stuff
--- - Feed the dog
---   - He'll eat anything
--- - Feed the bird
--- - Feed the alligator
--- - Feed the elephant
+-- 1. Feed the cat
+--    - The good stuff
+-- 2. Feed the dog
+--    - He'll eat anything
+-- 3. Feed the bird
+-- 4. Feed the alligator
+-- 5. Feed the elephant
 -- @
-newtype ListItems = ListItems (NonEmpty Item)
+data ListItems = ListItems ListType (NonEmpty Item)
+  deriving stock (Eq, Ord, Show, Generic)
+
+data ListType = Bulleted | Plussed | Numbered
   deriving stock (Eq, Ord, Show, Generic)
 
 -- | A line in a bullet-list. Can contain sublists, as shown in `ListItems`.
@@ -539,36 +546,54 @@ code = L.lexeme space $ do
     lng = char ' '  *> someTillEnd
 
 list :: Parser Block
-list = L.lexeme space $ List <$> listItems 0
+list = L.lexeme space . fmap List $ itemChoice 0
 
-listItems :: Int -> Parser ListItems
-listItems indent = ListItems
-  <$> sepBy1 (item indent) (try $ newline *> lookAhead (nextItem indent))
+itemChoice :: Int -> Parser ListItems
+itemChoice indent = bulleted
+ indent <|> starred indent <|> numbered indent
 
-nextItem :: Int -> Parser ()
-nextItem indent = do
-  void . string $ T.replicate indent " "
-  void $ string "- "
+bulleted :: Int -> Parser ListItems
+bulleted
+ indent = ListItems Bulleted <$> listItems (string "- ") indent
+
+starred :: Int -> Parser ListItems
+starred indent = ListItems Plussed <$> listItems (string "+ ") indent
+
+numbered :: Int -> Parser ListItems
+numbered indent = ListItems Numbered <$> listItems numd indent
+  where
+    numd = (decimal :: Parser Word) *> string ". "
+
+listItems :: Parser a -> Int -> Parser (NonEmpty Item)
+listItems tick indent = sepBy1 (item tick indent) $ try next
+  where
+    next = newline *> lookAhead (nextItem tick indent)
+
+nextItem :: Parser a -> Int -> Parser a
+nextItem tick indent = string (T.replicate indent " ") *> tick
 
 -- | Conditions for ending the current bullet:
 --
 -- 1. You find two '\n' at the end of a line.
--- 2. The first two non-space characters of the next line are "- ".
-item :: Int -> Parser Item
-item indent = do
-  leading <- string $ T.replicate indent " "
-  void $ string "- "
-  l <- bullet
-  let !nextInd = T.length leading + 2
-  Item l <$> optional (try $ newline *> listItems nextInd)
+-- 2. The first two non-space characters of the next line mark the start of a point, like "- ".
+item :: Parser a -> Int -> Parser Item
+item tick indent = do
+  void . string $ T.replicate indent " "
+  void tick
+  l <- content
+  let !nextInd = indent + 2
+  Item l <$> optional (try $ newline *> itemChoice nextInd)
   where
-    bullet :: Parser (NonEmpty Words)
-    bullet = do
+    content :: Parser (NonEmpty Words)
+    content = do
       l <- line '\n'
-      try (lookAhead keepGoing *> space *> ((l <>) <$> bullet)) <|> pure l
+      try (lookAhead keepGoing *> space *> ((l <>) <$> content)) <|> pure l
 
     keepGoing :: Parser ()
-    keepGoing = void $ char '\n' *> manyOf ' ' *> noneOf ['-', '\n']
+    keepGoing = void $ char '\n' *> manyOf ' ' *> satisfy notItem
+
+    notItem :: Char -> Bool
+    notItem c = c /= '\n' && c /= '-' && c /= '+' && not (isDigit c)
 
 table :: Parser Block
 table = L.lexeme space $ Table <$> sepEndBy1 row (char '\n')
@@ -799,6 +824,7 @@ prettyInterval i = case i of
   Month -> "m"
   Year  -> "y"
 
+-- | Render a `Block` into the original text form it was parsed from (or equivalent).
 prettyBlock :: Block -> Text
 prettyBlock o = case o of
   Code l t -> "#+begin_src" <> maybe "" (\(Language l') -> " " <> l' <> "\n") l
@@ -806,21 +832,41 @@ prettyBlock o = case o of
     <> "\n#+end_src"
   Quote t -> "#+begin_quote\n" <> t <> "\n#+end_quote"
   Example t -> "#+begin_example\n" <> t <> "\n#+end_example"
-  Paragraph ht -> par ht
-  List items -> lis 0 items
+  Paragraph ht -> prettyWordGroups ht
+  List items -> prettyList items
   Table rows -> T.intercalate "\n" . map row $ NEL.toList rows
   where
-    lis :: Int -> ListItems -> Text
-    lis indent (ListItems is) = T.intercalate "\n" . map (f indent) $ NEL.toList is
+    row :: Row -> Text
+    row Break    = "|-|"
+    row (Row cs) = "| " <> (T.intercalate " | " . map col $ NEL.toList cs) <> " |"
 
-    f :: Int -> Item -> Text
-    f indent (Item ws li) =
-      T.replicate indent " " <> "- " <> par ws
-      <> maybe "" (\is -> "\n" <> lis (indent + 2) is) li
+    col :: Column -> Text
+    col Empty       = ""
+    col (Column ws) = T.unwords . map prettyWords $ NEL.toList ws
 
-    par :: NonEmpty Words -> Text
-    par (h :| t) = prettyWords h <> para h t
+prettyList :: ListItems -> Text
+prettyList = T.unlines . prettyListWork 0
 
+prettyListWork :: Int -> ListItems -> [Text]
+prettyListWork indent (ListItems t is) = concatMap (uncurry prettyItem) . relabel $ NEL.toList is
+  where
+    relabel :: [Item] -> [(Text, Item)]
+    relabel = case t of
+      Bulleted -> map ("-",)
+      Plussed  -> map ("+",)
+      Numbered -> zipWith (\n i -> (tshow n <> ".", i)) ([1..] :: [Int])
+
+    prettyItem :: Text -> Item -> [Text]
+    prettyItem lbl (Item ws sub) = real : maybe [] (prettyListWork $ succ indent) sub
+      where
+        real = prefix <> lbl <> " " <> prettyWordGroups ws
+
+    prefix :: Text
+    prefix = T.replicate (2 * indent) " "
+
+prettyWordGroups :: NonEmpty Words -> Text
+prettyWordGroups (h :| t) = prettyWords h <> para h t
+  where
     -- | Stick punctuation directly behind the chars in front of it, while
     -- paying special attention to parentheses.
     para :: Words -> [Words] -> Text
@@ -831,14 +877,6 @@ prettyBlock o = case o of
         Punct '(' -> " " <> prettyWords w <> para w ws
         Punct _   -> prettyWords w <> para w ws
         _         -> " " <> prettyWords w <> para w ws
-
-    row :: Row -> Text
-    row Break    = "|-|"
-    row (Row cs) = "| " <> (T.intercalate " | " . map col $ NEL.toList cs) <> " |"
-
-    col :: Column -> Text
-    col Empty       = ""
-    col (Column ws) = T.unwords . map prettyWords $ NEL.toList ws
 
 prettyWords :: Words -> Text
 prettyWords w = case w of
@@ -853,3 +891,6 @@ prettyWords w = case w of
   Image (URL url)         -> "[[" <> url <> "]]"
   Punct c                 -> T.singleton c
   Plain t                 -> t
+
+tshow :: Show a => a -> Text
+tshow = T.pack . show
